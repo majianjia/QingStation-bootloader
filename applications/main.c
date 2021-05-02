@@ -10,6 +10,7 @@
  * @see    Please refer to README for detailed information.
  *******************************************************************************
  * Copyright (c) 2020 Akos Pasztor.                     https://akospasztor.com
+ * Copyright (c) 2021 Jianjia Ma.
  *******************************************************************************
  */
 
@@ -18,6 +19,7 @@
 #include "bootloader.h"
 #include "fatfs.h"
 #include "rtthread.h"
+#include "tiny_md5.h"
 
 /* Private variables ---------------------------------------------------------*/
 static uint8_t BTNcounter = 0;
@@ -36,7 +38,187 @@ void    GPIO_Init(void);
 void    GPIO_DeInit(void);
 void    SystemClock_Config(void);
 void    Error_Handler(void);
-void    print(const char* str);
+
+// start from second block.
+// the first block for firmware info. firmware start from the second block
+#define ERASE_SIZE    (2048)
+#define OTA_BASE_ADDRESS  (0x08080000)
+#define OTA_TAG_ADDRESS   (OTA_BASE_ADDRESS)
+#define OTA_APP_BASE_ADDRESS  (OTA_BASE_ADDRESS + ERASE_SIZE)
+#define APP_TAG_ADDRESS   (0x0807F800)
+#define APP_SIZE_MAX (APP_TAG_ADDRESS - APP_ADDRESS)
+
+
+char *not_a_strtok(char *str, const char *delim)
+{
+    static char *tok;
+    static char *next;
+    char *m;
+
+    if (delim == NULL) return NULL;
+
+    tok = (str) ? str : next;
+    if (tok == NULL) return NULL;
+
+    m = rt_strstr(tok, delim);
+
+    if (m) {
+        next = m + rt_strlen(delim);
+        *m = '\0';
+    } else {
+        next = NULL;
+    }
+
+    return tok;
+}
+
+float not_a_atof(const char* s){
+  float rez = 0, fact = 1;
+  if (*s == '-'){
+    s++;
+    fact = -1;
+  };
+  for (int point_seen = 0; *s; s++){
+    if (*s == '.'){
+      point_seen = 1;
+      continue;
+    };
+    int d = *s - '0';
+    if (d >= 0 && d <= 9){
+      if (point_seen) fact /= 10.0f;
+      rez = rez * 10.0f + (float)d;
+    };
+  };
+  return rez * fact;
+};
+
+int read_tag(uint32_t addr, char *version, int *filesize, char *md5)
+{
+    char* temp = NULL;
+    uint8_t buf[128];
+    // get data
+    strncpy((char*)buf, (char*)(addr), sizeof(buf));
+    temp = not_a_strtok((char*)buf, ","); // version
+    if(temp != NULL)
+        strncpy(version, temp, 32);
+    else return -1;
+
+    temp = not_a_strtok(NULL, ","); // filesize
+    if(temp != NULL)
+        *filesize = atoi(temp);
+    else return -1;
+
+    not_a_strtok(NULL, ","); // package size
+
+    temp = not_a_strtok(NULL, ","); // md5
+    if(temp != NULL)
+        strncpy(md5, temp, 33);
+    else
+        return -1;
+    return 0;
+}
+
+
+// the bootloader will search the "key" (everything before the version) and extract the version
+// version = 0.0 is debug version.
+const char firmware_version[] = "QingFirmwareVersion^%&@$:0.1";
+
+// return the offset to the end of the "key", i.e. the start of the value.
+int32_t search_key_location(const char* addr, const char *key, uint32_t len)
+{
+    int idx = 0;
+    int key_len = rt_strlen(key);
+    for(; idx<len; idx++){
+        if(*addr == *key){
+            if(rt_strncmp(addr, key, key_len) == 0)
+                return idx + key_len;
+        }
+        addr++;
+    }
+    return -1;
+}
+
+// cut the string until ":" and return the length
+int32_t get_key_strings(const char* key, char* buf)
+{
+    for(int i = 0; *key != '\0'; i++){
+        *buf++ = *key;
+        if(*key++ == ':'){
+            *buf = '\0';
+            return i++;
+        }
+    }
+    return -1;
+}
+
+void md5tostr(uint8_t* md5, char*str)
+{
+    for(int i=0; i<16; i++)
+        rt_sprintf(&str[2*i],"%02x", md5[i]);
+}
+
+int generate_app_tag(char* tag, uint8_t* fw_addr, uint32_t fwsize, char* version)
+{
+    char md5[16] = {0};
+    char output[36] = {0};
+    tiny_md5(fw_addr, fwsize, md5);
+    md5tostr(md5, output);
+    rt_sprintf(tag, "%s,%d,256,%s", version, fwsize, output);
+    return 0;
+}
+
+int stm32_flash_erase(rt_uint32_t addr, size_t size);
+int stm32_flash_write(rt_uint32_t addr, const uint8_t *buf, size_t size);
+
+// assuming ota is valid, copy ota to app.
+int transfer_ota_to_app(int fwsize)
+{
+    uint8_t buf[256];
+    int len;
+    int rslt;
+    uint32_t addr_to, addr_from;
+    //copy tag
+    len = rt_strlen((char*)OTA_TAG_ADDRESS);
+    if(len > sizeof(buf))
+        len = sizeof(buf);
+    addr_from = OTA_TAG_ADDRESS;
+    addr_to = APP_TAG_ADDRESS;
+
+    buf[len] = '\0';
+    rt_memcpy(buf, (uint8_t*)addr_from, len);
+    if(addr_to % ERASE_SIZE == 0)
+        stm32_flash_erase(addr_to, ERASE_SIZE);
+    stm32_flash_write(addr_to, buf, len);
+
+    // copy fw
+    len = fwsize;
+    int bsize =  sizeof(buf);
+    for(int i= 0;; i++)
+    {
+        addr_from = OTA_APP_BASE_ADDRESS + i*bsize;
+        addr_to = APP_ADDRESS + i*bsize;
+        if(addr_to % ERASE_SIZE == 0)
+            stm32_flash_erase(addr_to, ERASE_SIZE);
+
+        if(len > bsize)
+        {
+            rt_memcpy(buf, (uint8_t*)addr_from, bsize);
+            rslt = stm32_flash_write(addr_to, buf, bsize);
+            len -= bsize;
+        }
+        else
+        {
+            rt_memcpy(buf, (uint8_t*)addr_from, len);
+            rslt = stm32_flash_write(addr_to, buf, len);
+            break;
+        }
+        rt_kprintf("\r Copying to 0x%x, len %d, %d%%", addr_to, rslt, (fwsize-len)*100/fwsize);
+        LED_B_TG();
+    }
+    rt_kprintf("\n");
+    return 0;
+}
+
 
 /* Main ----------------------------------------------------------------------*/
 int main(void)
@@ -47,10 +229,109 @@ int main(void)
     clock_information();
     GPIO_Init();
 
+    //transfer_ota_to_app(2048);
+
     rt_kprintf("\nQingStation Bootloader V0.1\n");
+    rt_kprintf("Checking App and OTA space... \n");
+
+    // check if the current App is debug version, then we will not compare ota and app.
+    char* loc = 0;
+    int app_ver = 0;
+    uint8_t buf[64];
+    get_key_strings(firmware_version,  buf);
+    loc = search_key_location((const char*) (APP_ADDRESS), buf, 446*1024);
+    if(loc > 0){
+        loc = loc + APP_ADDRESS;
+        rt_kprintf("Current App version:%s\n", loc);
+        app_ver = atoi(loc);
+        //generate_app_tag(buf, (char*)APP_ADDRESS, 446*1024, loc);
+        if(app_ver == 0) // 0 means debugging firmware, downloaded by debugger. do nothing.
+        {
+            rt_kprintf("This is a debug firmware, ignore OTA checking\n");
+            goto __sdcard_boot;
+        }
+    }
+
+    // Check ota fm version
+    float ota_ver = 0;
+    get_key_strings(firmware_version,  buf);
+    loc = search_key_location((const char*) (OTA_APP_BASE_ADDRESS), buf, 446*1024);
+    if(loc > 0){
+        loc = loc + OTA_APP_BASE_ADDRESS;
+        rt_kprintf("Current OTA version:%s\n", loc);
+        ota_ver = not_a_atof(loc);
+    }
+
+    //
+    int rslt = 0;
+
+    // validate ota and app's md5
+    int is_ota_valid = 0;
+    char ota_version[32];
+    int ota_size = 0;
+    char ota_tag_md5[36];
+    char ota_md5[18];
+    rslt = read_tag(OTA_TAG_ADDRESS, ota_version, &ota_size, ota_tag_md5);
+    if (rslt < 0){
+        rt_kprintf("OTA firmware tag error, OTA firmware is invalid.\n");
+    }
+    else {
+        tiny_md5((unsigned char*)OTA_APP_BASE_ADDRESS, ota_size, (uint8_t*)ota_md5);
+        md5tostr(ota_md5, buf);
+        if(rt_strcasecmp(buf, ota_tag_md5) == 0)
+            is_ota_valid = 1;
+        rt_kprintf("OTA firmware version: %s, size:%d, md5:%s\n", ota_version, ota_size, ota_tag_md5);
+        rt_kprintf("OTA firmware validation md5:%s\n", buf);
+    }
+
+    // validate app;
+    int is_app_valid = 0;
+    char app_version[32];
+    char app_tag_md5[36];
+    char app_md5[18];
+    int app_size;
+    rslt = read_tag(APP_TAG_ADDRESS, app_version, &app_size, app_tag_md5);
+    if (rslt < 0){
+        rt_kprintf("App firmware tag error, App firmware is invalid.\n");
+    }
+    else {
+        tiny_md5((unsigned char*)APP_ADDRESS, app_size, (uint8_t*)app_md5);
+        md5tostr(app_md5, buf);
+        if(rt_strcasecmp(buf, app_tag_md5) == 0)
+            is_app_valid = 1;
+
+        rt_kprintf("App firmware version: %s, size:%d, md5:%s\n", app_version, app_size, app_tag_md5);
+        rt_kprintf("App firmware validation md5:%s\n", buf);
+    }
+
+    // if both are ok, then compare the version.
+    if(is_ota_valid && is_app_valid)
+    {
+        // copy ota to app
+        if(ota_ver > app_ver)
+        {
+            rt_kprintf("OTA firmware has higher version, updating App.\n");
+            transfer_ota_to_app(ota_size);
+        }
+    }
+    // ota valid, app invalid
+    else if( is_ota_valid && !is_app_valid)
+    {
+        // copy
+        rt_kprintf("App firmware is invalid, updating App from OTA space.\n");
+        transfer_ota_to_app(ota_size);
+
+    }
+    // ota invalid, app valid or invalid
+    else {
+        // do nothing
+    }
+
+    // start original sd card bootloader.
+__sdcard_boot:
 
     LED_ALL_ON();
-    rt_kprintf("Boot started.\n");
+    rt_kprintf("\SD card boot started.\n");
     rt_thread_delay(500);
     LED_ALL_OFF();
 
@@ -143,7 +424,7 @@ int main(void)
 #endif
 
         rt_kprintf("Launching Application");
-        for(int i=0; i<8; i++)
+        for(int i=0; i<4; i++)
         {
             rt_kprintf(".");
             LED_B_ON();
@@ -151,7 +432,7 @@ int main(void)
             LED_B_OFF();
             rt_thread_delay(50);
         }
-        rt_kprintf("\n");
+        rt_kprintf("\n\n");
 
         /* De-initialize bootloader hardware & peripherals */
         SD_DeInit();
@@ -263,7 +544,8 @@ void Enter_Bootloader(void)
     /* Step 2: Erase Flash */
     rt_kprintf("Erasing flash...\n");
     LED_R_ON();
-    Bootloader_Erase();
+    stm32_flash_erase(APP_ADDRESS, APP_SIZE_MAX); // TEST
+    //Bootloader_Erase();
     LED_R_OFF();
     rt_kprintf("Flash erase finished.\n");
 

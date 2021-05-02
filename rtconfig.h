@@ -19,7 +19,8 @@
 
 /* Memory Management */
 
-#define RT_USING_NOHEAP
+#define RT_USING_SMALL_MEM
+#define RT_USING_HEAP
 /* end of Memory Management */
 #define RT_USING_CONSOLE
 #define RT_CONSOLEBUF_SIZE 256

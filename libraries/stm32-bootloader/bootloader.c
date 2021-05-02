@@ -47,6 +47,9 @@ uint8_t Bootloader_Init(void)
     return BL_OK;
 }
 
+
+
+
 /**
  * @brief  This function erases the user application area in flash
  * @return Bootloader error code ::eBootloaderErrorCodes
