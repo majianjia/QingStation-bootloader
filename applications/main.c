@@ -121,7 +121,7 @@ int read_tag(uint32_t addr, char *version, int *filesize, char *md5)
 
 // the bootloader will search the "key" (everything before the version) and extract the version
 // version = 0.0 is debug version.
-const char firmware_version[] = "QingFirmwareVersion^%&@$:0.1";
+const char firmware_version[] = "QingFirmwareVersion^%&@$:0";
 
 // return the offset to the end of the "key", i.e. the start of the value.
 int32_t search_key_location(const char* addr, const char *key, uint32_t len)
@@ -167,8 +167,28 @@ int generate_app_tag(char* tag, uint8_t* fw_addr, uint32_t fwsize, char* version
     return 0;
 }
 
+
 int stm32_flash_erase(rt_uint32_t addr, size_t size);
 int stm32_flash_write(rt_uint32_t addr, const uint8_t *buf, size_t size);
+
+int write_app_tag(int fwsize)
+{
+    uint8_t tag[1024] = {0xff};
+    uint8_t buf[64];
+    int loc;
+    get_key_strings(firmware_version,  buf);
+    loc = search_key_location((const char*) (APP_ADDRESS), buf, 446*1024);
+    if(loc > 0){
+        loc = loc + APP_ADDRESS;
+        rt_kprintf("generating app tag\n");
+        generate_app_tag(tag, APP_ADDRESS, fwsize, (char*)loc);
+        stm32_flash_erase(APP_TAG_ADDRESS, ERASE_SIZE);
+        stm32_flash_write(APP_TAG_ADDRESS, tag, sizeof(tag));
+        rt_kprintf("New tag\"%s\" is written to 0x%x\n", tag, APP_TAG_ADDRESS);
+    }
+    return 0;
+}
+
 
 // assuming ota is valid, copy ota to app.
 int transfer_ota_to_app(int fwsize)
@@ -235,15 +255,15 @@ int main(void)
     rt_kprintf("Checking App and OTA space... \n");
 
     // check if the current App is debug version, then we will not compare ota and app.
-    char* loc = 0;
+    int loc = 0;
     int app_ver = 0;
     uint8_t buf[64];
     get_key_strings(firmware_version,  buf);
     loc = search_key_location((const char*) (APP_ADDRESS), buf, 446*1024);
     if(loc > 0){
         loc = loc + APP_ADDRESS;
-        rt_kprintf("Current App version:%s\n", loc);
-        app_ver = atoi(loc);
+        rt_kprintf("Current App version:%s\n", (char*)loc);
+        app_ver = atoi((char*)loc);
         //generate_app_tag(buf, (char*)APP_ADDRESS, 446*1024, loc);
         if(app_ver == 0) // 0 means debugging firmware, downloaded by debugger. do nothing.
         {
@@ -258,8 +278,8 @@ int main(void)
     loc = search_key_location((const char*) (OTA_APP_BASE_ADDRESS), buf, 446*1024);
     if(loc > 0){
         loc = loc + OTA_APP_BASE_ADDRESS;
-        rt_kprintf("Current OTA version:%s\n", loc);
-        ota_ver = not_a_atof(loc);
+        rt_kprintf("Current OTA version:%s\n", (char*)loc);
+        ota_ver = atoi((char*)loc);
     }
 
     //
@@ -527,7 +547,8 @@ void Enter_Bootloader(void)
     rt_kprintf("Software found on SD.");
 
     /* Check size of application found on SD card */
-    if(Bootloader_CheckSize(f_size(&SDFile)) != BL_OK)
+    int fsize = f_size(&SDFile);
+    if(Bootloader_CheckSize(fsize) != BL_OK)
     {
         rt_kprintf("Error: app on SD card is too large.\n");
 
@@ -536,7 +557,7 @@ void Enter_Bootloader(void)
         rt_kprintf("SD ejected.\n");
         return;
     }
-    rt_kprintf("App size OK.\n");
+    rt_kprintf("App size: %d, OK.\n", fsize);
 
     /* Step 1: Init Bootloader and Flash */
     Bootloader_Init();
@@ -595,6 +616,16 @@ void Enter_Bootloader(void)
             LED_B_TG();
         }
     } while((fr == FR_OK) && (num > 0));
+
+    // generate tag
+    uint8_t unused[64];
+    int rslt, temp;
+    rslt = read_tag(APP_TAG_ADDRESS, unused, &temp, unused);
+    if(rslt != 0)
+    {
+        rt_kprintf("App tag invalid, regenerate tag\n");
+        write_app_tag(fsize);
+    }
 
     /* Step 4: Finalize Programming */
     Bootloader_FlashEnd();
