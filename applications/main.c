@@ -351,7 +351,7 @@ int main(void)
 __sdcard_boot:
 
     LED_ALL_ON();
-    rt_kprintf("\SD card boot started.\n");
+    rt_kprintf("\nSD card boot started.\n");
     rt_thread_delay(500);
     LED_ALL_OFF();
 
