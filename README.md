@@ -9,10 +9,11 @@ It is based on [RT-Thread Nano](https://github.com/RT-Thread/rtthread-nano) and 
 
 The current function is very basic, and is modified from the stm32-bootloader's example project. 
 It can copy the binary file from SD card to application section. 
+It also validate the OTA firmware and copy OTA to application once required by application. 
 
 The application offset is `0x10000`, `64kB`.
-The whole Application section until the end of the flash will be wiped out completely. 
-It is not ideal yet. I am thinking of using only half of the flash for application and the other half for backup firmware, and use a few kb to store the configurations. 
+The OTA firmware is located to the second blank (another half) of the flash memory and it will be upgrade from the application (throught MQTT).
+See [OTA doc](https://github.com/majianjia/QingStation/blob/main/doc/ota.md) and [QingStation firmware (application)](https://github.com/majianjia/QingStation-Firmware) for more detail.
 
 Currently no CRC checksum.
 
